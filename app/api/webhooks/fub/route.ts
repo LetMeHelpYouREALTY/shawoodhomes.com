@@ -14,6 +14,7 @@
  * - Email notifications
  */
 
+import { createHmac, timingSafeEqual } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { FollowUpBossClient } from '@/lib/fub/client';
 import { ClaudeClient } from '@/lib/claude/client';
@@ -21,16 +22,35 @@ import { propertySearchTemplate } from '@/lib/claude/prompt-templates';
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    // Read the raw body first — signature verification requires the exact
+    // bytes FUB sent, before any JSON re-serialization.
+    const rawBody = await request.text();
+    const signature = request.headers.get('FUB-Signature');
+    const systemKey = process.env.FUB_SYSTEM_KEY || process.env.FUB_WEBHOOK_SECRET;
+
+    if (systemKey) {
+      if (!verifySignature(rawBody, signature, systemKey)) {
+        console.error('[FUB Webhook] Rejected request with invalid or missing signature');
+        return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });
+      }
+    } else {
+      // No system key configured — we can't verify authenticity. Fail closed
+      // in production so the endpoint can't be abused by unauthenticated callers.
+      console.warn(
+        '[FUB Webhook] FUB_SYSTEM_KEY is not configured — signature verification is disabled.'
+      );
+      if (process.env.NODE_ENV === 'production') {
+        return NextResponse.json(
+          { error: 'Webhook is not configured for signature verification' },
+          { status: 503 }
+        );
+      }
+    }
+
+    const body = JSON.parse(rawBody);
     const { event, data } = body;
 
     console.log(`[FUB Webhook] Received event: ${event}`);
-
-    // Verify webhook authenticity (optional but recommended)
-    // const signature = request.headers.get('X-FUB-Signature');
-    // if (!verifySignature(signature, body)) {
-    //   return NextResponse.json({ error: 'Invalid signature' }, { status: 403 });
-    // }
 
     // Route to appropriate handler
     switch (event) {
@@ -370,10 +390,25 @@ async function triggerPropertySearch(personId: number, neighborhood?: string) {
 }
 
 /**
- * Verify webhook signature (implement if FUB provides signing)
+ * Verify FUB webhook signature.
+ *
+ * Per Follow Up Boss docs (https://docs.followupboss.com/reference/webhooks-guide):
+ * base64-encode the raw (non-prettified) JSON payload, compute an HMAC-SHA256
+ * hash of that base64 string using your X-System-Key, and compare it to the
+ * `FUB-Signature` header.
  */
-function verifySignature(signature: string | null, body: any): boolean {
-  // Implement signature verification if FUB provides it
-  // For now, rely on HTTPS and IP allowlisting
-  return true;
+function verifySignature(rawBody: string, signature: string | null, systemKey: string): boolean {
+  if (!signature) return false;
+
+  const encoded = Buffer.from(rawBody, 'utf8').toString('base64');
+  const computed = createHmac('sha256', systemKey).update(encoded).digest('hex');
+
+  const signatureBuffer = Buffer.from(signature);
+  const computedBuffer = Buffer.from(computed);
+
+  if (signatureBuffer.length !== computedBuffer.length) {
+    return false;
+  }
+
+  return timingSafeEqual(signatureBuffer, computedBuffer);
 }
