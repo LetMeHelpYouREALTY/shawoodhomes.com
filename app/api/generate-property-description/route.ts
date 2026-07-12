@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import OpenAI from "openai";
+import { claudeAiLimiter, getClientId, checkRateLimit, getRateLimitHeaders } from "@/lib/rate-limit";
 
 const openrouter = new OpenAI({
   apiKey: process.env.OPENROUTER_API_KEY,
@@ -8,6 +9,17 @@ const openrouter = new OpenAI({
 
 export async function POST(request: NextRequest) {
   try {
+    // Protect the paid AI API from unauthenticated abuse (10 req/min per client)
+    const clientId = getClientId(request);
+    const rateLimit = await checkRateLimit(claudeAiLimiter, clientId);
+
+    if (!rateLimit.success) {
+      return NextResponse.json(
+        { error: "Too many requests. Please slow down and try again shortly." },
+        { status: 429, headers: getRateLimitHeaders(rateLimit) }
+      );
+    }
+
     const { propertyDetails } = await request.json();
 
     if (!propertyDetails) {
@@ -59,7 +71,7 @@ Requirements:
 
     const description = response.choices[0].message.content;
 
-    return NextResponse.json({ description });
+    return NextResponse.json({ description }, { headers: getRateLimitHeaders(rateLimit) });
   } catch (error) {
     console.error("OpenRouter API error:", error);
     return NextResponse.json(

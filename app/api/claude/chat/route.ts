@@ -13,12 +13,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { ClaudeClient } from '@/lib/claude/client';
 import { defaultCache } from '@/lib/claude/cache';
+import { claudeAiLimiter, getClientId, checkRateLimit, getRateLimitHeaders } from '@/lib/rate-limit';
 import {
   realEstateAgentTemplate,
   propertySearchTemplate,
   homeValuationTemplate,
   customerSupportTemplate,
-  createCachedPrompt,
 } from '@/lib/claude/prompt-templates';
 
 // Initialize Claude client
@@ -30,6 +30,17 @@ const claude = new ClaudeClient({
 
 export async function POST(request: NextRequest) {
   try {
+    // Protect the paid Claude API from unauthenticated abuse (10 req/min per client)
+    const clientId = getClientId(request);
+    const rateLimit = await checkRateLimit(claudeAiLimiter, clientId);
+
+    if (!rateLimit.success) {
+      return NextResponse.json(
+        { error: 'Too many requests. Please slow down and try again shortly.' },
+        { status: 429, headers: getRateLimitHeaders(rateLimit) }
+      );
+    }
+
     const body = await request.json();
     const { messages, templateType, stream = false } = body;
 
@@ -126,13 +137,16 @@ export async function POST(request: NextRequest) {
     );
 
     // Return response with metrics
-    return NextResponse.json({
-      response: response.content,
-      usage: response.usage,
-      cost: response.cost,
-      model: response.model,
-      cached: false,
-    });
+    return NextResponse.json(
+      {
+        response: response.content,
+        usage: response.usage,
+        cost: response.cost,
+        model: response.model,
+        cached: false,
+      },
+      { headers: getRateLimitHeaders(rateLimit) }
+    );
   } catch (error) {
     console.error('Claude API error:', error);
     
